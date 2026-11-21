@@ -221,8 +221,7 @@ func (p *prober) cluster(recs []Record) {
 	// pool drops many probes; a stray one-off reply from a neighbour is not
 	// enough to merge.
 	pairFlows := map[[2]string]int{}
-	seenFlows := map[string]map[string]int{}
-	for k, set := range seenIn {
+	for _, set := range seenIn {
 		if len(set) < 2 {
 			continue
 		}
@@ -241,16 +240,11 @@ func (p *prober) cluster(recs []Record) {
 		}
 		sort.Strings(kept)
 		for i := 0; i < len(kept); i++ {
-			if seenFlows[k.flow] == nil {
-				seenFlows[k.flow] = map[string]int{}
-			}
-			seenFlows[k.flow][kept[i]]++
 			for j := i + 1; j < len(kept); j++ {
 				pairFlows[[2]string{kept[i], kept[j]}]++
 			}
 		}
 	}
-	_ = seenFlows
 	// Build per-flow sequences so a candidate pair can be checked for
 	// downstream lockstep.  Two interfaces of one device answer the same
 	// downstream device; two real devices at a fork send the probe to
