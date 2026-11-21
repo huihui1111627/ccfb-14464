@@ -128,7 +128,13 @@ func (p *prober) links(nodes []FNode) ([]FLink, []Branch) {
 	for _, n := range nodes {
 		level[n.ID] = n.Level
 	}
-	_ = level
+	// mixedHop reports whether a flow saw more than one device at a TTL.  That
+	// means a per-packet balancer upstream, so the identity of the hop is not
+	// stable within the flow and an adjacency across it cannot be asserted.
+	mixedHop := func(flowKey string, ttl int) bool {
+		m := p.flowMulti[flowKey]
+		return m != nil && m[ttl] > 1
+	}
 	nodeOfDev := func(dev string) string {
 		if id, ok := p.devToNode[dev]; ok {
 			return id
@@ -138,6 +144,7 @@ func (p *prober) links(nodes []FNode) ([]FLink, []Branch) {
 	for _, pa := range p.paths {
 		prevDev := "src"
 		prevNode := "src"
+		_ = prevDev
 		silent := 0
 		for ttl := 1; ttl < len(pa.Hops); ttl++ {
 			a := pa.Hops[ttl]
@@ -153,6 +160,24 @@ func (p *prober) links(nodes []FNode) ([]FLink, []Branch) {
 			if node == prevNode {
 				continue
 			}
+			// A device cannot be its own ancestor in a forward path.  If the
+			// new node already appears earlier on this path, a probe crossed a
+			// loop or a TTL-shifted plane; treat the transition as a gap and
+			// do not draw an edge back into the path.
+			looped := false
+			for back := 0; back < ttl-1; back++ {
+				if pa.Hops[back] == "" {
+					continue
+				}
+				if nodeOfDev(p.deviceOf(pa.Hops[back])) == node {
+					looped = true
+					break
+				}
+			}
+			if looped {
+				silent++
+				continue
+			}
 			k := key{prevNode, node}
 			l := agg[k]
 			if l == nil {
@@ -165,6 +190,13 @@ func (p *prober) links(nodes []FNode) ([]FLink, []Branch) {
 			// jumps more than one level crosses routers that never answered.
 			if level[node]-level[prevNode] > 1 {
 				l.Skipped = level[node] - level[prevNode] - 1
+			}
+			if mixedHop(pa.FlowKey, ttl) || mixedHop(pa.FlowKey, ttl-1) {
+				// The hop identity was not stable within this flow, so the
+				// pair is an inference, not an observation.
+				if l.Skipped < 1 {
+					l.Skipped = 1
+				}
 			}
 			if pa.RTT[ttl] > 0 {
 				rtts[k] = append(rtts[k], pa.RTT[ttl])
@@ -287,6 +319,38 @@ func pruneSplices(links []FLink, level map[string]int) []FLink {
 			continue
 		}
 		out = append(out, l)
+	}
+	return out
+}
+
+// offPathNodes returns the nodes that exist only because a destination sweep
+// reached them; they are reported for evidence but excluded from this
+// destination's graph.
+func (p *prober) offPathNodes(nodes []FNode) []string {
+	var out []string
+	for _, n := range nodes {
+		if n.ID == "src" {
+			continue
+		}
+		dev := p.deviceOf(n.Label)
+		if dev == "" {
+			continue
+		}
+		if p.onPathDev[dev] {
+			continue
+		}
+		// A device with at least one address that answered a probe to this
+		// destination is on-path even if the representative address came from
+		// a sweep.
+		onPath := false
+		for _, a := range n.Addrs {
+			if p.onPathAddr[a] {
+				onPath = true
+			}
+		}
+		if !onPath {
+			out = append(out, n.ID)
+		}
 	}
 	return out
 }

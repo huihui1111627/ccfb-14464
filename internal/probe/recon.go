@@ -53,7 +53,7 @@ func (p *prober) recon() {
 	}
 	// Leave room past the destination: the TTL axis is in units of routers,
 	// not path length, and the scan discovers the endpoint itself.
-	p.depth += 2
+	p.depth += 1
 }
 
 func (p *prober) hopAddrsInit(ttl int) map[string]int {
@@ -392,4 +392,51 @@ func (p *prober) destMovesElsewhere(base sim.Probe, ttl int) bool {
 		}
 	}
 	return false
+}
+
+// calibrateDepth finds how deep the TTL axis actually needs to go.  Different
+// flows have different path lengths (and silent or over-decrementing routers
+// shift the TTL at which the endpoint answers), so the ceiling must be the
+// maximum over several flows, not the first reference walk.
+func (p *prober) calibrateDepth() {
+	maxSeen := p.depth
+	probes := 8
+	if probes > len(p.flows) {
+		probes = len(p.flows)
+	}
+	for i := 0; i < probes && p.budgetLeft(); i++ {
+		base := p.flows[i]
+		depth, seen := 0, 0
+		for ttl := 1; ttl <= 48 && p.budgetLeft(); ttl++ {
+			q := base
+			q.TTL = ttl
+			rep := p.send(q, "depth")
+			p.hopPkts[ttl]++
+			depth = ttl
+			if rep.Kind == sim.ReplyNone {
+				p.hopNone[ttl]++
+				// A loss here is not the end of the path: rate limiting and
+				// silent routers both produce it.  Keep walking a few more
+				// TTLs before giving up on this flow.
+				if ttl-seen > 4 {
+					break
+				}
+				continue
+			}
+			seen = ttl
+			p.hopAddrsInit(ttl)[rep.SrcAddr]++
+			p.noteHopDev(ttl, rep.SrcAddr)
+			if ttl > maxSeen {
+				maxSeen = ttl
+			}
+			if rep.Kind == sim.ReplyEcho {
+				break
+			}
+		}
+		_ = depth
+	}
+	p.depth = maxSeen + 2
+	if p.depth > 48 {
+		p.depth = 48
+	}
 }

@@ -199,8 +199,12 @@ func (p *prober) cluster(recs []Record) {
 		if r.FlowGroup != "scan" {
 			continue
 		}
-		if p.spray[r.Hop] >= 0.3 {
-			continue // per-packet spray: several devices per flow is legit
+		// A hop downstream of a per-packet router is also effectively
+		// per-packet: the same flow tuple legitimately reaches different
+		// devices there, so same-flow co-occurrence proves nothing about
+		// aliasing.  Inherit the condition upstream.
+		if p.packetish(r.Hop) {
+			continue
 		}
 		// The identification field is regenerated per packet and is not part
 		// of the routing tuple; including it would make every probe its own
@@ -247,12 +251,77 @@ func (p *prober) cluster(recs []Record) {
 		}
 	}
 	_ = seenFlows
+	// Build per-flow sequences so a candidate pair can be checked for
+	// downstream lockstep.  Two interfaces of one device answer the same
+	// downstream device; two real devices at a fork send the probe to
+	// different next hops.
+	type step struct{ here, next string }
+	flowSeq := map[string]map[int][]step{}
+	for _, r := range recs {
+		if r.ReplyAddr == "" || r.ReplyKind == "none" || r.FlowGroup != "scan" {
+			continue
+		}
+		flowID := fmt.Sprintf("%d/%d/%d/%d", r.SrcPort, r.DstPort, r.Proto, r.TOS)
+		if flowSeq[flowID] == nil {
+			flowSeq[flowID] = map[int][]step{}
+		}
+		flowSeq[flowID][r.Hop] = append(flowSeq[flowID][r.Hop], step{here: r.ReplyAddr})
+	}
+	for _, byHop := range flowSeq {
+		for ttl, steps := range byHop {
+			nextSteps := byHop[ttl+1]
+			for i := range steps {
+				if i < len(nextSteps) {
+					steps[i].next = nextSteps[i].here
+				}
+			}
+			byHop[ttl] = steps
+		}
+	}
+	downstreamMoves := func(a, b string, ttl int) bool {
+		// true when choosing between a and b changes the next hop in a
+		// majority of flows -- real ECMP, not aliasing.
+		moved, seen := 0, 0
+		for _, byHop := range flowSeq {
+			steps := byHop[ttl]
+			nextFor := map[string]map[string]int{}
+			for _, st := range steps {
+				if st.next == "" {
+					continue
+				}
+				if nextFor[st.here] == nil {
+					nextFor[st.here] = map[string]int{}
+				}
+				nextFor[st.here][st.next]++
+			}
+			na, nb := nextFor[a], nextFor[b]
+			if len(na) == 0 || len(nb) == 0 {
+				continue
+			}
+			seen++
+			diff := false
+			for x := range na {
+				for y := range nb {
+					if x != y {
+						diff = true
+					}
+				}
+			}
+			if diff {
+				moved++
+			}
+		}
+		return seen > 0 && float64(moved)/float64(seen) >= 0.6
+	}
 	for pair, n := range pairFlows {
 		if n < 1 {
 			continue
 		}
 		if ttlOfAddr2(recs, pair[0]) != ttlOfAddr2(recs, pair[1]) {
 			continue
+		}
+		if downstreamMoves(pair[0], pair[1], ttlOfAddr2(recs, pair[0])) {
+			continue // a real fork: the two addresses lead to different hops
 		}
 		// Both members must be consistently multi-address at that TTL: else a
 		// single slow answer from another device would pull it in.
@@ -425,11 +494,18 @@ func idProximity(stream []idObs, a, b string) (bool, float64) {
 	if len(diffs) < 4 {
 		return false, 0
 	}
+	// A per-address counter may sit one or two ahead of the shared base, so
+	// the cross-address difference can be a small *negative* number as well.
+	// What identifies a shared device is that the difference is small and
+	// stable in magnitude, whichever counter is momentarily ahead.
 	good := 0
 	var abs []int
 	for _, d := range diffs {
-		if d >= 0 && d <= 8 {
+		if d >= -8 && d <= 8 {
 			good++
+			if d < 0 {
+				d = -d
+			}
 			abs = append(abs, d)
 		}
 	}
@@ -443,6 +519,17 @@ func idProximity(stream []idObs, a, b string) (bool, float64) {
 		return false, frac
 	}
 	return true, frac * (1 - float64(med)/16)
+}
+
+// packetish reports whether the hop is, or is downstream of, a per-packet
+// balancer.  Such hops cannot use same-flow co-occurrence as alias evidence.
+func (p *prober) packetish(ttl int) bool {
+	for t := 1; t <= ttl; t++ {
+		if p.spray[t] >= 0.3 || p.lbMode[t] == "per-packet" {
+			return true
+		}
+	}
+	return false
 }
 
 func absi(x int) int {

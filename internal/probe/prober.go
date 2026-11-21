@@ -89,6 +89,9 @@ type prober struct {
 	rounds int
 
 	mergedGroups []Path
+	onPathAddr   map[string]bool
+	onPathDev    map[string]bool
+	flowMulti    map[string]map[int]int
 	ifaceNodes   []IfaceNode
 }
 
@@ -102,17 +105,20 @@ func RunNamed(net *sim.Sim, scenario, src, dest string, opts Options) *Result {
 	opts = normalize(opts)
 	p := &prober{
 		net: net, opts: opts, src: src, dst: dest,
-		rng:       rand.New(rand.NewSource(0x5eed)),
-		addrToDev: map[string]string{},
-		devIPID:   map[string]string{},
-		devToNode: map[string]string{},
-		hopFields: map[int]map[sim.HashField]*fstat{},
-		spray:     map[int]float64{},
-		lbMode:    map[int]string{},
-		hopDevs:   map[int]map[string]int{},
-		hopPkts:   map[int]int{},
-		hopNone:   map[int]int{},
-		hopAddrs:  map[int]map[string]int{},
+		rng:        rand.New(rand.NewSource(0x5eed)),
+		addrToDev:  map[string]string{},
+		devIPID:    map[string]string{},
+		devToNode:  map[string]string{},
+		hopFields:  map[int]map[sim.HashField]*fstat{},
+		spray:      map[int]float64{},
+		lbMode:     map[int]string{},
+		hopDevs:    map[int]map[string]int{},
+		hopPkts:    map[int]int{},
+		hopNone:    map[int]int{},
+		hopAddrs:   map[int]map[string]int{},
+		onPathAddr: map[string]bool{},
+		onPathDev:  map[string]bool{},
+		flowMulti:  map[string]map[int]int{},
 	}
 	p.res = &Result{Scenario: scenario, Src: src, Dest: dest, Confidence: opts.Confidence}
 
@@ -187,12 +193,17 @@ func normalize(o Options) Options {
 func (p *prober) send(pkt sim.Probe, group string) sim.Reply {
 	p.probes++
 	rep, recs := p.net.Send(pkt)
+	if rep.Kind != sim.ReplyNone && rep.SrcAddr != "" && pkt.DstIP == p.dst {
+		p.onPathAddr[rep.SrcAddr] = true
+	}
 	p.records = append(p.records, Record{
 		Round: 1, TTL: pkt.TTL, SrcIP: pkt.SrcIP, DstIP: pkt.DstIP,
 		SrcPort: int(pkt.SrcPort), DstPort: int(pkt.DstPort), Proto: int(pkt.Proto),
 		TOS: int(pkt.TOS), IPID: int(pkt.IPID), ReplyIPID: int(rep.IPID),
+		OffPath:   pkt.DstIP != p.dst,
 		ReplyAddr: rep.SrcAddr, ReplyKind: kindName(rep.Kind),
-		OuterTTL: rep.OuterTTL, RTTMs: rep.RTTMs, FlowGroup: group, Hop: pkt.TTL,
+		OuterTTL: rep.OuterTTL, RTTMs: rep.RTTMs, FlowGroup: group,
+		FlowKey: FlowKey(pkt), FlowLabel: int(pkt.FlowLabel), Hop: pkt.TTL,
 	})
 	var truth []string
 	for _, r := range recs {

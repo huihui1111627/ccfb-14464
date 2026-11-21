@@ -13,12 +13,26 @@ import (
 // unavoidably part of a flow).  Fields shown to be ignored are pinned so all
 // probes in one flow stay on one path.
 func (p *prober) chooseFlows() {
-	// One flow per branch combination, then extra flows aimed at the least
-	// sampled branch at each hop.  Start from a Cartesian product over the
-	// steering fields with a small set of values: this guarantees that every
-	// branch combination of a multi-stage topology is actually visited at
-	// least once, which a purely random sample does not.
-	steer := append([]sim.HashField{}, p.steering...)
+	// Plan a Cartesian product over every *candidate* field except the ones a
+	// hop was actually observed to ignore.  Steering fields are known to
+	// matter; fields that were merely inconclusive (common when the only
+	// router hashing them sits behind a TTL-hiding or silent hop) are still
+	// varied, because leaving them pinned guarantees that router's branches
+	// are never visited.  Only fields tested and found inert are pinned.
+	ignored := map[sim.HashField]bool{}
+	for _, inf := range p.fields {
+		if inf.Verdict == "ignored" {
+			ignored[fieldByName(inf.Field)] = true
+		}
+	}
+	var steer []sim.HashField
+	for _, f := range sim.AllHashFields {
+		if ignored[f] || f == sim.FieldDstIP {
+			// The destination is held fixed: this scan maps one destination.
+			continue
+		}
+		steer = append(steer, f)
+	}
 	if len(steer) == 0 {
 		steer = []sim.HashField{sim.FieldSrcPort}
 	}
@@ -61,15 +75,21 @@ func (p *prober) chooseFlows() {
 		_ = i
 		rec(0, q)
 	}
-	// If the product collapsed (e.g. fields are ignored), fall back to a
-	// spread of source ports so the scan still samples every branch a hash
-	// on an unmodelled field would produce.
-	for i := 0; len(p.flows) < minInt(p.opts.MaxFlows, 40); i++ {
+	// Exploration flows: after the planned product, spend the remaining flow
+	// budget on tuples that vary every candidate field at once.  Some routers
+	// (behind silent or TTL-hiding hops) only reveal a branch for a
+	// combination the field sweep could not attribute, and a small random
+	// cover finds those without weakening any individual flow's stability.
+	for i := 0; len(p.flows) < p.opts.MaxFlows; i++ {
 		q := p.baseProbe(i)
-		q.SrcPort = uint16(25000 + i*97)
+		q.SrcPort = uint16(21000 + (i*97)%20000)
 		q.DstPort = uint16(33434 + (i*53)%20000)
+		q.Proto = uint8([]int{17, 6, 1, 132}[i%4])
+		q.TOS = uint8((i % 8) * 16)
+		q.IPID = uint16((i*7919 + 3) & 0xffff)
+		q.FlowLabel = uint32(i*104729 + 7)
 		add(q)
-		if i > 400 {
+		if i > 4000 {
 			break
 		}
 	}
@@ -282,4 +302,13 @@ func sortedIntKeys(m map[string]int) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func fieldByName(name string) sim.HashField {
+	for _, f := range sim.AllHashFields {
+		if f.String() == name {
+			return f
+		}
+	}
+	return sim.FieldSrcPort
 }

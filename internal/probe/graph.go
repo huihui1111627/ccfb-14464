@@ -14,6 +14,30 @@ func (p *prober) buildGraph() {
 	// Recompute the device histogram from the final alias clusters before any
 	// counting, so estimates and group sizes agree with the graph.
 	p.rebuildHopDevs()
+	p.computeFlowMultiplicity()
+	// Drop devices reached only through off-path destination sweeps: they are
+	// real, but they are not part of this destination's paths and must not
+	// inflate branch counts.
+	offDev := map[string]bool{}
+	for _, r := range p.records {
+		if r.OffPath && r.ReplyAddr != "" {
+			offDev[p.deviceOf(r.ReplyAddr)] = true
+		}
+	}
+	for ttl, m := range p.hopDevs {
+		var drop []string
+		for d := range m {
+			if offDev[d] && !p.onPathDev[d] {
+				drop = append(drop, d)
+			}
+		}
+		for _, d := range drop {
+			delete(m, d)
+		}
+		if len(m) == 0 {
+			delete(p.hopDevs, ttl)
+		}
+	}
 	// Hop groups: reply addresses per TTL, keyed by device cluster so that
 	// several interfaces of one device do not look like several hops.
 	ttls := make([]int, 0, len(p.hopAddrs))
@@ -49,7 +73,18 @@ func (p *prober) buildGraph() {
 
 	p.groupPaths()
 	f.Paths = p.mergedGroups
+	// Devices reached only through off-path destination sweeps are reported
+	// as observations, not as part of this destination's graph.
+	p.onPathDev = map[string]bool{}
+	for _, pa := range p.paths {
+		for _, a := range pa.Hops {
+			if a != "" {
+				p.onPathDev[p.deviceOf(a)] = true
+			}
+		}
+	}
 	f.Nodes = p.nodes()
+	f.OffPathDevices = p.offPathNodes(f.Nodes)
 	f.Links, f.Branches = p.links(f.Nodes)
 	f.Ifaces = p.ifaceNodes
 	f.Anomalies = p.anomalies()
@@ -76,4 +111,36 @@ func (p *prober) derefPaths() []Path {
 		out = append(out, *pa)
 	}
 	return out
+}
+
+// computeFlowMultiplicity records, for every flow and TTL, how many distinct
+// devices answered.  A value above one means a per-packet balancer sits
+// upstream, so hop identity is not stable within that flow.
+func (p *prober) computeFlowMultiplicity() {
+	p.flowMulti = map[string]map[int]int{}
+	seen := map[string]map[int]map[string]bool{}
+	for _, r := range p.records {
+		if r.ReplyAddr == "" || r.ReplyKind == "none" {
+			continue
+		}
+		// Only probe traffic that belongs to the mapping run for this
+		// destination; off-path sweeps describe a different graph.
+		if r.FlowGroup != "scan" && r.FlowGroup != "depth" {
+			continue
+		}
+		flowID := r.FlowKey
+		if seen[flowID] == nil {
+			seen[flowID] = map[int]map[string]bool{}
+		}
+		if seen[flowID][r.Hop] == nil {
+			seen[flowID][r.Hop] = map[string]bool{}
+		}
+		seen[flowID][r.Hop][p.deviceOf(r.ReplyAddr)] = true
+	}
+	for f, hops := range seen {
+		p.flowMulti[f] = map[int]int{}
+		for ttl, set := range hops {
+			p.flowMulti[f][ttl] = len(set)
+		}
+	}
 }

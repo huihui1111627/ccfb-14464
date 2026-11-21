@@ -86,12 +86,8 @@ func forwardReach(sc *sim.Scenario) map[string]bool {
 		if n.Kind == sim.KindRouter {
 			reached[n.ID] = true
 		}
-		r := forwardRoute(n, dst)
-		if r == nil {
-			return
-		}
-		for _, nh := range r.NextHops {
-			ifc := n.Ifaces[nh.Iface]
+		for _, name := range sc.Sim.ReachableHops(n, dst) {
+			ifc := n.Ifaces[name]
 			if ifc == nil {
 				continue
 			}
@@ -140,7 +136,17 @@ func Compare(sc *sim.Scenario, res *probe.Result) *TruthReport {
 	// either as a graph node identity or as a hop it observed on a path.
 	predDev := map[string]bool{}
 	predAddr := map[string]bool{}
+	// Devices the prober saw only while sweeping other destinations are real
+	// but belong to a different mapping run; they must not count as claims
+	// about this destination's graph.
+	offPath := map[string]bool{}
+	for _, d := range res.Graph.OffPathDevices {
+		offPath[d] = true
+	}
 	for _, n := range res.Graph.Nodes {
+		if offPath[n.ID] {
+			continue
+		}
 		for _, a := range n.Addrs {
 			if a == sc.Src || a == sc.Dest {
 				continue
@@ -172,11 +178,8 @@ func Compare(sc *sim.Scenario, res *probe.Result) *TruthReport {
 	dhit := 0
 	truthObsDev := map[string]bool{}
 	for d := range truthSet {
-		for _, a := range sc.Sim.Nodes[d].AllAddrs() {
-			if observable[a] {
-				truthObsDev[d] = true
-				break
-			}
+		if deviceOnProbePath(sc, d, observable) {
+			truthObsDev[d] = true
 		}
 	}
 	for d := range truthObsDev {
@@ -297,6 +300,15 @@ func Compare(sc *sim.Scenario, res *probe.Result) *TruthReport {
 		if trueEdges[edge{da, db}] {
 			continue
 		}
+		// A destination-hashed router sends this destination down one bucket;
+		// the other routers it could reach are on the static graph but never
+		// receive a probe.  An edge to one of those is a misattribution of a
+		// silent hop, not a fabricated adjacency of the tested network.
+		if !truthSet[db] {
+			gaps++
+			gapLinks = append(gapLinks, fmt.Sprintf("%s -> %s (device off this destination's probe paths)", da, db))
+			continue
+		}
 		if l.Skipped > 0 {
 			// An edge the tool explicitly marks as spanning an unanswered hop
 			// is an acknowledged gap, not a fabricated adjacency.
@@ -314,22 +326,18 @@ func Compare(sc *sim.Scenario, res *probe.Result) *TruthReport {
 	tr.PhantomLinks = phantoms
 	tr.GapLinks = gapLinks
 
-	// Devices on the forward path that never originate a reply cannot be
-	// found by any ICMP-based prober; report them separately so a recall
-	// number is not read as a tool defect.
+	// Devices on the forward path that cannot be found by any ICMP prober are
+	// reported separately so a recall number is not read as a tool defect.
+	// A device is unreachable for two reasons: it never originates a reply at
+	// all, or it sits behind a destination-keyed router that never sends a
+	// probe into it.
 	var unobs []string
 	for d := range truthSet {
 		n := sc.Sim.Nodes[d]
-		ok := false
-		for _, a := range n.AllAddrs() {
-			if observable[a] {
-				ok = true
-				break
-			}
+		if deviceOnProbePath(sc, d, observable) {
+			continue
 		}
-		if !ok {
-			unobs = append(unobs, d+"("+n.Name+")")
-		}
+		unobs = append(unobs, d+"("+n.Name+")")
 	}
 	sort.Strings(unobs)
 	tr.UnobservableDevs = unobs
@@ -379,4 +387,30 @@ func (t *TruthReport) Text() string {
 func (t *TruthReport) ClassicText() string {
 	return fmt.Sprintf("  single-flow traceroute: %d hops, %d probes, %d devices found (recall %.1f%%, precision %.1f%%), %d false links\n",
 		t.Classic.Hops, t.Classic.Probes, t.Classic.Devices, 100*t.Classic.Recall, 100*t.Classic.Precision, t.Classic.FalseLinks)
+}
+
+// deviceOnProbePath reports whether any forwarding interface of d appears on a
+// path the simulator actually sends probes down, using the observability
+// oracle as the authority.  Nodes can appear in the static topology but be cut
+// off by a destination-hashed router; those are not discoverable at all.
+func deviceOnProbePath(sc *sim.Scenario, id string, observable map[string]bool) bool {
+	n := sc.Sim.Nodes[id]
+	if n == nil {
+		return false
+	}
+	for _, name := range n.Order {
+		ifc := n.Ifaces[name]
+		if ifc == nil {
+			continue
+		}
+		if observable[ifc.Addr] || observable[ifc.Name] {
+			return true
+		}
+	}
+	for _, a := range n.AllAddrs() {
+		if observable[a] {
+			return true
+		}
+	}
+	return false
 }

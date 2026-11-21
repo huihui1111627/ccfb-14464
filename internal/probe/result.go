@@ -69,8 +69,14 @@ type Record struct {
 	OuterTTL  int     `json:"outer_ttl"`
 	RTTMs     float64 `json:"rtt_ms"`
 	FlowGroup string  `json:"flow_group"`
+	FlowKey   string  `json:"flow_key,omitempty"`
+	FlowLabel int     `json:"flow_label"`
 	Hop       int     `json:"hop"`
-	Note      string  `json:"note,omitempty"`
+	// OffPath marks probes sent to a different destination prefix while
+	// testing destination-keyed balancing.  Their replies are useful evidence
+	// but the devices behind them are not part of this destination's paths.
+	OffPath bool   `json:"off_path,omitempty"`
+	Note    string `json:"note,omitempty"`
 }
 
 // Path is one observed source-address sequence, hop by hop.  A missing reply
@@ -163,15 +169,16 @@ type HopEstimate struct {
 // Fusion is the reconstructed graph: nodes with addresses, edges between
 // consecutive nodes, annotated with width and branch delays.
 type Fusion struct {
-	Nodes     []FNode       `json:"nodes"`
-	Links     []FLink       `json:"links"`
-	Branches  []Branch      `json:"branches"`
-	Ifaces    []IfaceNode   `json:"ifaces"`
-	NGroups   []HopGroup    `json:"hop_groups"`
-	Paths     []Path        `json:"paths"`
-	Estimates []HopEstimate `json:"hop_estimates"`
-	Anomalies []Anomaly     `json:"anomalies"`
-	Stats     Stats         `json:"stats"`
+	Nodes          []FNode       `json:"nodes"`
+	Links          []FLink       `json:"links"`
+	Branches       []Branch      `json:"branches"`
+	Ifaces         []IfaceNode   `json:"ifaces"`
+	NGroups        []HopGroup    `json:"hop_groups"`
+	Paths          []Path        `json:"paths"`
+	OffPathDevices []string      `json:"off_path_devices,omitempty"`
+	Estimates      []HopEstimate `json:"hop_estimates"`
+	Anomalies      []Anomaly     `json:"anomalies"`
+	Stats          Stats         `json:"stats"`
 }
 
 // FNode is a device in the reconstructed graph.

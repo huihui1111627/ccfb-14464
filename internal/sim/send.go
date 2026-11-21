@@ -337,11 +337,6 @@ func (s *Sim) ObservableReplyAddrs(src, dst string) map[string]bool {
 		q.TOS = uint8((i % 8) * 16)
 		q.IPID = uint16(i*7919 + 1)
 		q.FlowLabel = uint32(i*104729 + 1)
-		if i%3 == 0 {
-			// Stay inside the routing domain while changing the prefix the
-			// destination hash sees.
-			q.DstIP = fmt.Sprintf("198.%d.%d.%d", 18+i%200, 1+(i*7)%250, 9)
-		}
 		for ttl := 1; ttl <= 32; ttl++ {
 			q.TTL = ttl
 			rep, _ := s.Send(q)
@@ -352,6 +347,44 @@ func (s *Sim) ObservableReplyAddrs(src, dst string) map[string]bool {
 				out[rep.SrcAddr] = true
 			}
 		}
+	}
+	return out
+}
+
+// ReachableHops returns the next-hop interfaces of n that a prober can reach
+// for this destination, by enumerating every header that can be varied without
+// changing the destination: source address, ports, protocol, TOS, IP-ID and
+// flow label.  The destination itself is held fixed, because the tool's job
+// is to map the paths to this destination; branches a destination-keyed
+// router only exposes for other prefixes are a different question and are
+// reported separately by the prober.
+func (s *Sim) ReachableHops(n *Node, dst netip.Addr) []string {
+	if n == nil {
+		return nil
+	}
+	r := n.routeFor(dst)
+	if r == nil || len(r.NextHops) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for i := 0; i < 64; i++ {
+		p := Probe{
+			SrcIP:     fmt.Sprintf("10.255.%d.%d", 1+i%50, 1+(i*7)%250),
+			DstIP:     dst.String(),
+			SrcPort:   uint16(1024 + (i*331)%60000),
+			DstPort:   uint16(1024 + (i*97)%60000),
+			Proto:     uint8([]int{17, 6, 1, 132}[i%4]),
+			TOS:       uint8((i % 8) * 16),
+			IPID:      uint16(i*7919 + 1),
+			FlowLabel: uint32(i*104729 + 3),
+		}
+		ifc, ok := n.pickNextHop(r, p)
+		if !ok || seen[ifc] {
+			continue
+		}
+		seen[ifc] = true
+		out = append(out, ifc)
 	}
 	return out
 }
